@@ -19,6 +19,8 @@
 package org.apache.flink.training.exercises.ridesandfares;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -45,11 +47,10 @@ public class RidesAndFaresExercise {
     private final SourceFunction<TaxiFare> fareSource;
     private final SinkFunction<RideAndFare> sink;
 
-    /** Creates a job using the sources and sink provided. */
-    public RidesAndFaresExercise(
-            SourceFunction<TaxiRide> rideSource,
-            SourceFunction<TaxiFare> fareSource,
-            SinkFunction<RideAndFare> sink) {
+    /**
+     * Creates a job using the sources and sink provided.
+     */
+    public RidesAndFaresExercise(SourceFunction<TaxiRide> rideSource, SourceFunction<TaxiFare> fareSource, SinkFunction<RideAndFare> sink) {
 
         this.rideSource = rideSource;
         this.fareSource = fareSource;
@@ -57,18 +58,29 @@ public class RidesAndFaresExercise {
     }
 
     /**
-     * Creates and executes the pipeline using the StreamExecutionEnvironment provided.
+     * Main method.
      *
      * @throws Exception which occurs during job execution.
+     */
+    public static void main(String[] args) throws Exception {
+
+        RidesAndFaresExercise job = new RidesAndFaresExercise(new TaxiRideGenerator(), new TaxiFareGenerator(), new PrintSinkFunction<>());
+
+        job.execute();
+    }
+
+    /**
+     * Creates and executes the pipeline using the StreamExecutionEnvironment provided.
+     *
      * @return {JobExecutionResult}
+     * @throws Exception which occurs during job execution.
      */
     public JobExecutionResult execute() throws Exception {
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // A stream of taxi ride START events, keyed by rideId.
-        DataStream<TaxiRide> rides =
-                env.addSource(rideSource).filter(ride -> ride.isStart).keyBy(ride -> ride.rideId);
+        DataStream<TaxiRide> rides = env.addSource(rideSource).filter(ride -> ride.isStart).keyBy(ride -> ride.rideId);
 
         // A stream of taxi fare events, also keyed by rideId.
         DataStream<TaxiFare> fares = env.addSource(fareSource).keyBy(fare -> fare.rideId);
@@ -80,38 +92,41 @@ public class RidesAndFaresExercise {
         return env.execute("Join Rides with Fares");
     }
 
-    /**
-     * Main method.
-     *
-     * @throws Exception which occurs during job execution.
-     */
-    public static void main(String[] args) throws Exception {
+    public static class EnrichmentFunction extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
 
-        RidesAndFaresExercise job =
-                new RidesAndFaresExercise(
-                        new TaxiRideGenerator(),
-                        new TaxiFareGenerator(),
-                        new PrintSinkFunction<>());
-
-        job.execute();
-    }
-
-    public static class EnrichmentFunction
-            extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
+        // capture state for rides and fares
+        private MapState<Long, TaxiRide> taxiRides;
+        private MapState<Long, TaxiFare> taxiFares;
 
         @Override
-        public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+        public void open(Configuration config){
+            // initialize the state containers for both states
+            taxiRides = getRuntimeContext().getMapState(new MapStateDescriptor<>("taxiRides", Long.class, TaxiRide.class));
+            taxiFares = getRuntimeContext().getMapState(new MapStateDescriptor<>("taxiFares", Long.class, TaxiFare.class));
         }
 
         @Override
         public void flatMap1(TaxiRide ride, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            Long rideId = ride.rideId;
+            if (taxiFares.contains(rideId)) {               // matching key in fare?
+                TaxiFare fare = taxiFares.get(rideId);      // if so, join and emit
+                out.collect(new RideAndFare(ride, fare));   // emit merged record
+                taxiFares.remove(rideId);                   // processed - remove from state
+            } else {
+                taxiRides.put(rideId, ride);                // if not: add state
+            }
         }
 
         @Override
         public void flatMap2(TaxiFare fare, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+            Long rideId = fare.rideId;
+            if (taxiRides.contains(rideId)) {                    // matching key in rides?
+                TaxiRide ride = taxiRides.get(rideId);          // if so, join and emit
+                out.collect(new RideAndFare(ride, fare));   // emit merged record
+                taxiRides.remove(rideId);                   // processed - remove from state
+            } else {
+                taxiFares.put(rideId, fare);                // if not: add state
+            }
         }
     }
 }
